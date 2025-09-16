@@ -1,21 +1,39 @@
 import cv2
-import pygame
+import dlib
 import time
+from scipy.spatial import distance
+from imutils import face_utils
+from playsound import playsound
+import threading
 
-# Initialize Pygame for sound
-pygame.mixer.init()
-pygame.mixer.music.load("alert.wav")  # Must be in same directory
+# Function to play alert sound
+def sound_alert():
+    playsound("alert.wav")
 
-# Load Haar cascades for face and eyes
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye_tree_eyeglasses.xml')
+# Eye Aspect Ratio (EAR) calculation
+def eye_aspect_ratio(eye):
+    A = distance.euclidean(eye[1], eye[5])
+    B = distance.euclidean(eye[2], eye[4])
+    C = distance.euclidean(eye[0], eye[3])
+    ear = (A + B) / (2.0 * C)
+    return ear
 
-# Constants
-EYE_CLOSED_FRAMES_THRESHOLD = 20
-eye_closed_counter = 0
-alarm_on = False
+# EAR threshold and frame count
+EAR_THRESHOLD = 0.25
+CONSEC_FRAMES = 30
 
-# Start webcam
+COUNTER = 0
+ALERT_ON = False
+
+# Initialize dlib face detector and facial landmarks predictor
+detector = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+
+# Get indexes of left and right eyes
+(lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
+(rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
+
+# Start webcam feed
 cap = cv2.VideoCapture(0)
 
 while True:
@@ -23,35 +41,49 @@ while True:
     if not ret:
         break
 
+    frame = cv2.resize(frame, (640, 480))
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+    faces = detector(gray)
 
-    eyes_detected = False
+    for face in faces:
+        shape = predictor(gray, face)
+        shape = face_utils.shape_to_np(shape)
 
-    for (x, y, w, h) in faces:
-        roi_gray = gray[y:y+h, x:x+w]
-        eyes = eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.1, minNeighbors=3)
-        if len(eyes) >= 1:
-            eyes_detected = True
-            for (ex, ey, ew, eh) in eyes:
-                cv2.rectangle(frame, (x+ex, y+ey), (x+ex+ew, y+ey+eh), (0, 255, 0), 2)
+        leftEye = shape[lStart:lEnd]
+        rightEye = shape[rStart:rEnd]
 
-    if eyes_detected:
-        eye_closed_counter = 0
-        if alarm_on:
-            pygame.mixer.music.stop()
-            alarm_on = False
-    else:
-        eye_closed_counter += 1
-        if eye_closed_counter >= EYE_CLOSED_FRAMES_THRESHOLD and not alarm_on:
-            pygame.mixer.music.play()
-            alarm_on = True
-            cv2.putText(frame, "DROWSINESS ALERT!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                        1.2, (0, 0, 255), 3)
+        leftEAR = eye_aspect_ratio(leftEye)
+        rightEAR = eye_aspect_ratio(rightEye)
+        ear = (leftEAR + rightEAR) / 2.0
+
+        # Draw contours
+        leftHull = cv2.convexHull(leftEye)
+        rightHull = cv2.convexHull(rightEye)
+        cv2.drawContours(frame, [leftHull], -1, (0, 255, 0), 1)
+        cv2.drawContours(frame, [rightHull], -1, (0, 255, 0), 1)
+
+        # Drowsiness logic
+        if ear < EAR_THRESHOLD:
+            COUNTER += 1
+            if COUNTER >= CONSEC_FRAMES:
+                if not ALERT_ON:
+                    ALERT_ON = True
+                    threading.Thread(target=sound_alert, daemon=True).start()
+
+                cv2.putText(frame, "DROWSINESS ALERT!", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+        else:
+            COUNTER = 0
+            ALERT_ON = False
+
+        # Show EAR
+        cv2.putText(frame, f"EAR: {ear:.2f}", (480, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
     cv2.imshow("Drowsiness Detection", frame)
-    if cv2.waitKey(1) & 0xFF == 27:  # ESC to quit
+    if cv2.waitKey(1) == 27:  # ESC to exit
         break
 
 cap.release()
 cv2.destroyAllWindows()
+
